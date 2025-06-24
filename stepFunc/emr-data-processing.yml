@@ -1,0 +1,290 @@
+{
+  "Comment": "Car Rental Data Pipeline",
+  "StartAt": "CreateCluster",
+  "TimeoutSeconds": 3600,
+  "States": {
+    "CreateCluster": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:createCluster.sync",
+      "Parameters": {
+        "Name": "CarRentalEMRCluster",
+        "ReleaseLabel": "emr-6.10.0",
+        "Applications": [
+          {
+            "Name": "Spark"
+          }
+        ],
+        "Instances": {
+          "InstanceGroups": [
+            {
+              "InstanceRole": "MASTER",
+              "InstanceType": "m5.xlarge",
+              "InstanceCount": 1
+            },
+            {
+              "InstanceRole": "CORE",
+              "InstanceType": "m5.xlarge",
+              "InstanceCount": 2
+            }
+          ],
+          "Ec2SubnetId": "subnet-01f627f24813b0187",
+          "KeepJobFlowAliveWhenNoSteps": true,
+          "TerminationProtected": false,
+          "Ec2KeyName": "ec2RSA"
+        },
+        "JobFlowRole": "EMR_EC2_DefaultRole",
+        "ServiceRole": "EMR_DefaultRole",
+        "LogUri": "s3://car-rental-datastore/emr-logs/"
+      },
+      "ResultPath": "$.cluster",
+      "Next": "CheckIfAlreadyProcessed",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "FailHandler"
+        }
+      ]
+    },
+    "CheckIfAlreadyProcessed": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:eu-north-1:102306345968:function:check_s3_output",
+      "ResultPath": "$.check_result",
+      "Next": "ShouldRunSparkJobs"
+    },
+    "ShouldRunSparkJobs": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.check_result.should_process",
+          "BooleanEquals": true,
+          "Next": "AddSparkStep1"
+        }
+      ],
+      "Default": "TerminateCluster"
+    },
+    "AddSparkStep1": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
+      "Parameters": {
+        "ClusterId.$": "$.cluster.ClusterId",
+        "Step": {
+          "Name": "VehicleLocationMetrics",
+          "ActionOnFailure": "TERMINATE_CLUSTER",
+          "HadoopJarStep": {
+            "Jar": "command-runner.jar",
+            "Args": [
+              "spark-submit",
+              "--deploy-mode",
+              "cluster",
+              "s3://car-rental-datastore/scripts/vehicle_location_metrics.py"
+            ]
+          }
+        }
+      },
+      "ResultPath": "$.step1_result",
+      "Next": "AddSparkStep2",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "TerminateClusterOnFailure"
+        }
+      ]
+    },
+    "AddSparkStep2": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
+      "Parameters": {
+        "ClusterId.$": "$.cluster.ClusterId",
+        "Step": {
+          "Name": "UserTransactionMetrics",
+          "ActionOnFailure": "TERMINATE_CLUSTER",
+          "HadoopJarStep": {
+            "Jar": "command-runner.jar",
+            "Args": [
+              "spark-submit",
+              "--deploy-mode",
+              "cluster",
+              "s3://car-rental-datastore/scripts/user_transaction_metrics.py"
+            ]
+          }
+        }
+      },
+      "Next": "TriggerCrawlers",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "TerminateClusterOnFailure"
+        }
+      ]
+    },
+    "TriggerCrawlers": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "StartDailyMetricsCrawler",
+          "States": {
+            "StartDailyMetricsCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+              "Parameters": {
+                "Name": "daily_metrics_crawler"
+              },
+              "Next": "WaitDailyMetricsCrawler"
+            },
+            "WaitDailyMetricsCrawler": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckDailyMetricsCrawler"
+            },
+            "CheckDailyMetricsCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+              "Parameters": {
+                "Name": "daily_metrics_crawler"
+              },
+              "Next": "IsDailyMetricsCrawlerReady"
+            },
+            "IsDailyMetricsCrawlerReady": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.Crawler.State",
+                  "StringEquals": "READY",
+                  "Next": "DoneDailyMetrics"
+                }
+              ],
+              "Default": "WaitDailyMetricsCrawler"
+            },
+            "DoneDailyMetrics": {
+              "Type": "Succeed"
+            }
+          }
+        },
+        {
+          "StartAt": "StartUserTransactionCrawler",
+          "States": {
+            "StartUserTransactionCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+              "Parameters": {
+                "Name": "user_transaction_metrics_crawler"
+              },
+              "Next": "WaitUserTransactionCrawler"
+            },
+            "WaitUserTransactionCrawler": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckUserTransactionCrawler"
+            },
+            "CheckUserTransactionCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+              "Parameters": {
+                "Name": "user_transaction_metrics_crawler"
+              },
+              "Next": "IsUserTransactionCrawlerReady"
+            },
+            "IsUserTransactionCrawlerReady": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.Crawler.State",
+                  "StringEquals": "READY",
+                  "Next": "DoneUserTransaction"
+                }
+              ],
+              "Default": "WaitUserTransactionCrawler"
+            },
+            "DoneUserTransaction": {
+              "Type": "Succeed"
+            }
+          }
+        },
+        {
+          "StartAt": "StartVehicleLocationCrawler",
+          "States": {
+            "StartVehicleLocationCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+              "Parameters": {
+                "Name": "vehicle_location_metrics"
+              },
+              "Next": "WaitVehicleLocationCrawler"
+            },
+            "WaitVehicleLocationCrawler": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckVehicleLocationCrawler"
+            },
+            "CheckVehicleLocationCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+              "Parameters": {
+                "Name": "vehicle_location_metrics"
+              },
+              "Next": "IsVehicleLocationCrawlerReady"
+            },
+            "IsVehicleLocationCrawlerReady": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.Crawler.State",
+                  "StringEquals": "READY",
+                  "Next": "DoneVehicleLocation"
+                }
+              ],
+              "Default": "WaitVehicleLocationCrawler"
+            },
+            "DoneVehicleLocation": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      ],
+      "Next": "RunAthenaQuery"
+    },
+    "RunAthenaQuery": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:eu-north-1:102306345968:function:run_athena_query",
+      "ResultPath": "$.athena_query_result",
+      "Next": "TerminateCluster",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ]
+    },
+    "TerminateCluster": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:terminateCluster",
+      "Parameters": {
+        "ClusterId.$": "$.cluster.ClusterId"
+      },
+      "End": true
+    },
+    "TerminateClusterOnFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:terminateCluster",
+      "Parameters": {
+        "ClusterId.$": "$.cluster.ClusterId"
+      },
+      "Next": "FailHandler"
+    },
+    "FailHandler": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "An error occurred during pipeline execution"
+    }
+  }
+}
