@@ -113,6 +113,7 @@
           }
         }
       },
+      "ResultPath": "$.step2_result",
       "Next": "TriggerCrawlers",
       "Catch": [
         {
@@ -247,12 +248,13 @@
           }
         }
       ],
+      "ResultPath": null,
       "Next": "RunAthenaQuery"
     },
     "RunAthenaQuery": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:eu-north-1:102306345968:function:run_athena_query",
-      "ResultPath": "$.athena_query_result",
+      "ResultPath": null,
       "Next": "TerminateCluster",
       "Retry": [
         {
