@@ -1,8 +1,50 @@
 {
   "Comment": "Car Rental Data Pipeline",
-  "StartAt": "CreateCluster",
+  "StartAt": "ValidateAssets",
   "TimeoutSeconds": 3600,
   "States": {
+    "ValidateAssets": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:eu-north-1:102306345968:function:validate_assets",
+      "ResultPath": "$.validation",
+      "Next": "ValidationCheck"
+    },
+    "ValidationCheck": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.validation.valid",
+          "BooleanEquals": true,
+          "Next": "CreateCluster"
+        }
+      ],
+      "Default": "WaitAndRetryValidation"
+    },
+    "WaitAndRetryValidation": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "RetryValidation"
+    },
+    "RetryValidation": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:eu-north-1:102306345968:function:validate_assets",
+      "ResultPath": "$.validation_retry",
+      "Next": "ValidationRetryCheck"
+    },
+    "ValidationRetryCheck": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.validation_retry.valid",
+          "BooleanEquals": true,
+          "Next": "CreateCluster"
+        }
+      ],
+      "Default": "FailGracefully"
+    },
+    "FailGracefully": {
+      "Type": "Succeed"
+    },
     "CreateCluster": {
       "Type": "Task",
       "Resource": "arn:aws:states:::elasticmapreduce:createCluster.sync",
@@ -37,7 +79,7 @@
         "LogUri": "s3://car-rental-datastore/emr-logs/"
       },
       "ResultPath": "$.cluster",
-      "Next": "CheckIfAlreadyProcessed",
+      "Next": "AddSparkStep1",
       "Catch": [
         {
           "ErrorEquals": [
@@ -46,23 +88,6 @@
           "Next": "FailHandler"
         }
       ]
-    },
-    "CheckIfAlreadyProcessed": {
-      "Type": "Task",
-      "Resource": "arn:aws:lambda:eu-north-1:102306345968:function:check_s3_output",
-      "ResultPath": "$.check_result",
-      "Next": "ShouldRunSparkJobs"
-    },
-    "ShouldRunSparkJobs": {
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Variable": "$.check_result.should_process",
-          "BooleanEquals": true,
-          "Next": "AddSparkStep1"
-        }
-      ],
-      "Default": "TerminateCluster"
     },
     "AddSparkStep1": {
       "Type": "Task",
@@ -168,81 +193,81 @@
           }
         },
         {
-          "StartAt": "StartUserTransactionCrawler",
+          "StartAt": "StartUserTransactionMetricsCrawler",
           "States": {
-            "StartUserTransactionCrawler": {
+            "StartUserTransactionMetricsCrawler": {
               "Type": "Task",
               "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
               "Parameters": {
                 "Name": "user_transaction_metrics_crawler"
               },
-              "Next": "WaitUserTransactionCrawler"
+              "Next": "WaitUserTransactionMetricsCrawler"
             },
-            "WaitUserTransactionCrawler": {
+            "WaitUserTransactionMetricsCrawler": {
               "Type": "Wait",
               "Seconds": 30,
-              "Next": "CheckUserTransactionCrawler"
+              "Next": "CheckUserTransactionMetricsCrawler"
             },
-            "CheckUserTransactionCrawler": {
+            "CheckUserTransactionMetricsCrawler": {
               "Type": "Task",
               "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
               "Parameters": {
                 "Name": "user_transaction_metrics_crawler"
               },
-              "Next": "IsUserTransactionCrawlerReady"
+              "Next": "IsUserTransactionMetricsCrawlerReady"
             },
-            "IsUserTransactionCrawlerReady": {
+            "IsUserTransactionMetricsCrawlerReady": {
               "Type": "Choice",
               "Choices": [
                 {
                   "Variable": "$.Crawler.State",
                   "StringEquals": "READY",
-                  "Next": "DoneUserTransaction"
+                  "Next": "DoneUserTransactionMetrics"
                 }
               ],
-              "Default": "WaitUserTransactionCrawler"
+              "Default": "WaitUserTransactionMetricsCrawler"
             },
-            "DoneUserTransaction": {
+            "DoneUserTransactionMetrics": {
               "Type": "Succeed"
             }
           }
         },
         {
-          "StartAt": "StartVehicleLocationCrawler",
+          "StartAt": "StartVehicleLocationMetricsCrawler",
           "States": {
-            "StartVehicleLocationCrawler": {
+            "StartVehicleLocationMetricsCrawler": {
               "Type": "Task",
               "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
               "Parameters": {
                 "Name": "vehicle_location_metrics"
               },
-              "Next": "WaitVehicleLocationCrawler"
+              "Next": "WaitVehicleLocationMetricsCrawler"
             },
-            "WaitVehicleLocationCrawler": {
+            "WaitVehicleLocationMetricsCrawler": {
               "Type": "Wait",
               "Seconds": 30,
-              "Next": "CheckVehicleLocationCrawler"
+              "Next": "CheckVehicleLocationMetricsCrawler"
             },
-            "CheckVehicleLocationCrawler": {
+            "CheckVehicleLocationMetricsCrawler": {
               "Type": "Task",
               "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
               "Parameters": {
                 "Name": "vehicle_location_metrics"
               },
-              "Next": "IsVehicleLocationCrawlerReady"
+              "Next": "IsVehicleLocationMetricsCrawlerReady"
             },
-            "IsVehicleLocationCrawlerReady": {
+            "IsVehicleLocationMetricsCrawlerReady": {
               "Type": "Choice",
               "Choices": [
                 {
                   "Variable": "$.Crawler.State",
                   "StringEquals": "READY",
-                  "Next": "DoneVehicleLocation"
+                  "Next": "DoneVehicleLocationMetrics"
                 }
               ],
-              "Default": "WaitVehicleLocationCrawler"
+              "Default": "WaitVehicleLocationMetricsCrawler"
             },
-            "DoneVehicleLocation": {
+            "DoneVehicleLocationMetrics": {
               "Type": "Succeed"
             }
           }
@@ -254,7 +279,7 @@
     "RunAthenaQuery": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:eu-north-1:102306345968:function:run_athena_query",
-      "ResultPath": null,
+      "ResultPath": "$.athena_result",
       "Next": "TerminateCluster",
       "Retry": [
         {
